@@ -3,7 +3,7 @@ const fs = require("fs");
 
 // =============== CONFIG ===============
 const ADMIN_BOT_TOKEN = process.env.ADMIN_BOT_TOKEN;
-const ADMIN_ID = 7771891436;
+const ADMIN_ID = 5653030758;
 const DATA_FILE = "papers.json";
 
 // =============== INIT ===============
