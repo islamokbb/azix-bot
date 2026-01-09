@@ -1,6 +1,6 @@
 import os
 import time
-import asyncio
+import threading
 import requests
 from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import (
@@ -10,44 +10,37 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
+from TikTokLive import TikTokLiveClient
+from TikTokApi import TikTokApi
 
-# ========= إعدادات =========
+# ====== إعدادات ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 keyboard = ReplyKeyboardMarkup(
-    [["📡 مراقبة تيك توك"], ["▶️ دخول رابط فيديو"]],
+    [
+        ["📡 مراقبة تيك توك", "▶️ دخول رابط فيديو"],
+        ["📊 معلومات الحساب (API)", "🔴 مراقبة لايف (API)"],
+        ["⛔ إيقاف مراقبة لايف"]
+    ],
     resize_keyboard=True
 )
 
-USER_STATE = {}     # حالة المستخدم
-WATCH_DATA = {}     # chat_id -> بيانات المراقبة
+USER_STATE = {}
+WATCH_DATA = {}
+LIVE_CLIENTS = {}  # chat_id -> TikTokLiveClient
+
+# ====== أدوات ======
+def clean_username(text):
+    text = text.strip()
+    if text.startswith("@"):
+        text = text[1:]
+    allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._"
+    if not all(c in allowed for c in text):
+        return None
+    return text
 
 
-# ========= دوال مساعدة =========
-def extract_username_from_url(url: str):
-    if "tiktok.com/@" in url:
-        return url.split("tiktok.com/@")[-1].split("/")[0]
-    return None
-
-
-def get_tiktok_info(username: str):
-    url = f"https://www.tiktok.com/@{username}"
-    headers = {"User-Agent": "Mozilla/5.0"}
-    r = requests.get(url, headers=headers, timeout=15)
-    text = r.text
-
-    is_live = '"isLive":true' in text
-
-    last_video_id = None
-    if '"id":"' in text:
-        last_video_id = text.split('"id":"')[1].split('"')[0]
-
-    has_story = '"hasStory":true' in text
-
-    return is_live, last_video_id, has_story
-
-
-# ========= أوامر البوت =========
+# ====== أوامر ======
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("اختر أمر 👇", reply_markup=keyboard)
 
@@ -57,12 +50,29 @@ async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
 
     if text == "📡 مراقبة تيك توك":
-        USER_STATE[chat_id] = "WAIT_ACCOUNT"
-        await update.message.reply_text("أرسل رابط حساب تيك توك 👇")
+        USER_STATE[chat_id] = "WAIT_MONITOR"
+        await update.message.reply_text("أرسل يوزر تيك توك 👇")
 
     elif text == "▶️ دخول رابط فيديو":
         USER_STATE[chat_id] = "WAIT_VIDEO"
         await update.message.reply_text("أرسل رابط فيديو تيك توك 👇")
+
+    elif text == "📊 معلومات الحساب (API)":
+        USER_STATE[chat_id] = "WAIT_API_INFO"
+        await update.message.reply_text("أرسل يوزر تيك توك 👇")
+
+    elif text == "🔴 مراقبة لايف (API)":
+        USER_STATE[chat_id] = "WAIT_API_LIVE"
+        await update.message.reply_text("أرسل يوزر تيك توك 👇")
+
+    elif text == "⛔ إيقاف مراقبة لايف":
+        client = LIVE_CLIENTS.get(chat_id)
+        if client:
+            client.stop()
+            del LIVE_CLIENTS[chat_id]
+            await update.message.reply_text("⛔ تم إيقاف مراقبة اللايف")
+        else:
+            await update.message.reply_text("ℹ️ لا يوجد لايف مراقَب حالياً")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -70,10 +80,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     state = USER_STATE.get(chat_id)
 
-    if state == "WAIT_ACCOUNT":
-        username = extract_username_from_url(text)
+    # ====== مراقبة Scraping (كما هي) ======
+    if state == "WAIT_MONITOR":
+        username = clean_username(text)
         if not username:
-            await update.message.reply_text("❌ رابط غير صحيح")
+            await update.message.reply_text("❌ يوزر غير صحيح")
             return
 
         WATCH_DATA[chat_id] = {
@@ -85,6 +96,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         USER_STATE[chat_id] = None
         await update.message.reply_text(f"✅ تم بدء مراقبة @{username}")
 
+    # ====== دخول رابط فيديو ======
     elif state == "WAIT_VIDEO":
         if "tiktok.com" not in text:
             await update.message.reply_text("❌ هذا ليس رابط تيك توك")
@@ -93,50 +105,88 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         headers = {"User-Agent": "Mozilla/5.0"}
         for _ in range(3):
             try:
-                requests.get(text, headers=headers, timeout=15)
-                time.sleep(15)
+                requests.get(text, headers=headers, timeout=10)
+                time.sleep(10)
             except:
                 pass
 
         USER_STATE[chat_id] = None
         await update.message.reply_text("✅ تم الدخول للرابط 3 مرات")
 
+    # ====== معلومات الحساب (API) ======
+    elif state == "WAIT_API_INFO":
+        username = clean_username(text)
+        if not username:
+            await update.message.reply_text("❌ يوزر غير صحيح")
+            return
 
-# ========= مهمة المراقبة =========
-async def watcher_job(context: ContextTypes.DEFAULT_TYPE):
-    app = context.application
-
-    for chat_id, data in WATCH_DATA.items():
         try:
-            username = data["username"]
-            is_live, last_video_id, has_story = get_tiktok_info(username)
+            with TikTokApi() as api:
+                user = api.user(username=username)
+                info = user.info()
+                stats = info.get("stats", {})
 
-            if is_live and not data["last_live"]:
-                await app.bot.send_message(chat_id, f"🔴 @{username} بدأ لايف")
+            msg = (
+                f"📊 معلومات الحساب (API)\n\n"
+                f"👤 @{username}\n"
+                f"👥 المتابعين: {stats.get('followerCount', 'غير متوفر')}\n"
+                f"👤 يتابع: {stats.get('followingCount', 'غير متوفر')}\n"
+                f"❤️ الإعجابات: {stats.get('heartCount', 'غير متوفر')}\n"
+                f"🎥 عدد الفيديوهات: {stats.get('videoCount', 'غير متوفر')}"
+            )
 
-            if last_video_id and data["last_video_id"] and last_video_id != data["last_video_id"]:
-                await app.bot.send_message(chat_id, f"📹 @{username} نشر فيديو جديد")
-
-            if has_story:
-                await app.bot.send_message(chat_id, f"🟡 @{username} عنده ستوري")
-
-            data["last_live"] = is_live
-            data["last_video_id"] = last_video_id
+            await update.message.reply_text(msg)
 
         except Exception as e:
-            print("Watcher error:", e)
+            await update.message.reply_text("❌ فشل جلب معلومات الحساب من API")
+
+        USER_STATE[chat_id] = None
+
+    # ====== مراقبة لايف (API) ======
+    elif state == "WAIT_API_LIVE":
+        username = clean_username(text)
+        if not username:
+            await update.message.reply_text("❌ يوزر غير صحيح")
+            return
+
+        if chat_id in LIVE_CLIENTS:
+            await update.message.reply_text("⚠️ يوجد لايف مراقَب بالفعل")
+            USER_STATE[chat_id] = None
+            return
+
+        await update.message.reply_text(f"⏳ بدء مراقبة لايف @{username}")
+
+        def run_live():
+            client = TikTokLiveClient(unique_id=username)
+            LIVE_CLIENTS[chat_id] = client
+
+            @client.on("connect")
+            async def on_connect(event):
+                await context.bot.send_message(
+                    chat_id,
+                    f"🔴 @{username} بدأ لايف (API)"
+                )
+
+            client.run()
+
+        threading.Thread(target=run_live, daemon=True).start()
+        USER_STATE[chat_id] = None
 
 
-# ========= التشغيل =========
+# ====== تشغيل ======
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Regex("^(📡 مراقبة تيك توك|▶️ دخول رابط فيديو)$"), handle_buttons))
+    app.add_handler(
+        MessageHandler(
+            filters.Regex(
+                "^(📡 مراقبة تيك توك|▶️ دخول رابط فيديو|📊 معلومات الحساب \\(API\\)|🔴 مراقبة لايف \\(API\\)|⛔ إيقاف مراقبة لايف)$"
+            ),
+            handle_buttons
+        )
+    )
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-
-    # تشغيل المراقبة كل 60 ثانية
-    app.job_queue.run_repeating(watcher_job, interval=60, first=5)
 
     app.run_polling()
 
