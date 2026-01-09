@@ -11,6 +11,7 @@ from telegram.ext import (
     filters
 )
 
+# ========= إعدادات =========
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 keyboard = ReplyKeyboardMarkup(
@@ -18,61 +19,61 @@ keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
-# حالات المستخدم
-USER_STATE = {}
-WATCH_DATA = {}  # chat_id -> {username, last_video_id, last_live}
+USER_STATE = {}     # حالة المستخدم
+WATCH_DATA = {}     # chat_id -> بيانات المراقبة
 
-# ---------- أدوات مساعدة ----------
-def extract_username_from_url(url: str) -> str | None:
-    # يقبل روابط مثل https://www.tiktok.com/@username
+
+# ========= دوال مساعدة =========
+def extract_username_from_url(url: str):
     if "tiktok.com/@" in url:
         return url.split("tiktok.com/@")[-1].split("/")[0]
     return None
 
+
 def get_tiktok_info(username: str):
-    # فحص بسيط (غير رسمي)
     url = f"https://www.tiktok.com/@{username}"
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, headers=headers, timeout=15)
     text = r.text
 
     is_live = '"isLive":true' in text
-    # محاولة بدائية لاستخراج آخر فيديو
+
     last_video_id = None
-    marker = '"id":"'
-    if marker in text:
-        last_video_id = text.split(marker)[1].split('"')[0]
+    if '"id":"' in text:
+        last_video_id = text.split('"id":"')[1].split('"')[0]
 
     has_story = '"hasStory":true' in text
 
     return is_live, last_video_id, has_story
 
-# ---------- أوامر ----------
+
+# ========= أوامر البوت =========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("اختر أمر 👇", reply_markup=keyboard)
 
+
 async def handle_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
     chat_id = update.message.chat_id
+    text = update.message.text
 
     if text == "📡 مراقبة تيك توك":
-        USER_STATE[chat_id] = "WAIT_TT_ACCOUNT"
+        USER_STATE[chat_id] = "WAIT_ACCOUNT"
         await update.message.reply_text("أرسل رابط حساب تيك توك 👇")
 
     elif text == "▶️ دخول رابط فيديو":
-        USER_STATE[chat_id] = "WAIT_VIDEO_URL"
+        USER_STATE[chat_id] = "WAIT_VIDEO"
         await update.message.reply_text("أرسل رابط فيديو تيك توك 👇")
+
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.message.chat_id
     text = update.message.text
-
     state = USER_STATE.get(chat_id)
 
-    if state == "WAIT_TT_ACCOUNT":
+    if state == "WAIT_ACCOUNT":
         username = extract_username_from_url(text)
         if not username:
-            await update.message.reply_text("❌ الرابط غير صحيح، أرسل رابط حساب تيك توك")
+            await update.message.reply_text("❌ رابط غير صحيح")
             return
 
         WATCH_DATA[chat_id] = {
@@ -80,10 +81,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "last_video_id": None,
             "last_live": False
         }
-        USER_STATE[chat_id] = None
-        await update.message.reply_text(f"✅ تم بدء المراقبة للحساب @{username}")
 
-    elif state == "WAIT_VIDEO_URL":
+        USER_STATE[chat_id] = None
+        await update.message.reply_text(f"✅ تم بدء مراقبة @{username}")
+
+    elif state == "WAIT_VIDEO":
         if "tiktok.com" not in text:
             await update.message.reply_text("❌ هذا ليس رابط تيك توك")
             return
@@ -97,43 +99,47 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
 
         USER_STATE[chat_id] = None
-        await update.message.reply_text("✅ تم الدخول للرابط 3 مرات للتأكد")
+        await update.message.reply_text("✅ تم الدخول للرابط 3 مرات")
 
-# ---------- مهمة المراقبة ----------
-async def watcher(app):
-    while True:
-        for chat_id, data in WATCH_DATA.items():
-            try:
-                username = data["username"]
-                is_live, last_video_id, has_story = get_tiktok_info(username)
 
-                if is_live and not data["last_live"]:
-                    await app.bot.send_message(chat_id, f"🔴 @{username} بدأ لايف")
+# ========= مهمة المراقبة =========
+async def watcher_job(context: ContextTypes.DEFAULT_TYPE):
+    app = context.application
 
-                if last_video_id and data["last_video_id"] and last_video_id != data["last_video_id"]:
-                    await app.bot.send_message(chat_id, f"📹 @{username} نشر فيديو جديد")
+    for chat_id, data in WATCH_DATA.items():
+        try:
+            username = data["username"]
+            is_live, last_video_id, has_story = get_tiktok_info(username)
 
-                if has_story:
-                    await app.bot.send_message(chat_id, f"🟡 @{username} عنده ستوري")
+            if is_live and not data["last_live"]:
+                await app.bot.send_message(chat_id, f"🔴 @{username} بدأ لايف")
 
-                data["last_live"] = is_live
-                data["last_video_id"] = last_video_id
+            if last_video_id and data["last_video_id"] and last_video_id != data["last_video_id"]:
+                await app.bot.send_message(chat_id, f"📹 @{username} نشر فيديو جديد")
 
-            except Exception as e:
-                print("Watcher error:", e)
+            if has_story:
+                await app.bot.send_message(chat_id, f"🟡 @{username} عنده ستوري")
 
-        await asyncio.sleep(60)
+            data["last_live"] = is_live
+            data["last_video_id"] = last_video_id
 
-# ---------- التشغيل ----------
-async def main():
+        except Exception as e:
+            print("Watcher error:", e)
+
+
+# ========= التشغيل =========
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(MessageHandler(filters.Regex("^(📡 مراقبة تيك توك|▶️ دخول رابط فيديو)$"), handle_buttons))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    asyncio.create_task(watcher(app))
-    await app.run_polling()
+    # تشغيل المراقبة كل 60 ثانية
+    app.job_queue.run_repeating(watcher_job, interval=60, first=5)
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
